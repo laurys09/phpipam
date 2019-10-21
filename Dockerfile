@@ -1,5 +1,7 @@
 FROM php:7.2-apache
 MAINTAINER Pierre Cheynier <pierre.cheynier@gmail.com>
+FROM php:5.6-apache
+MAINTAINER Shea Stewart <shea.stewart@arctiq.ca>
 
 ENV PHPIPAM_SOURCE https://github.com/phpipam/phpipam/
 ENV PHPIPAM_VERSION 1.3.2
@@ -7,13 +9,19 @@ ENV PHPMAILER_SOURCE https://github.com/PHPMailer/PHPMailer/
 ENV PHPMAILER_VERSION 5.2.21
 ENV PHPSAML_SOURCE https://github.com/onelogin/php-saml/
 ENV PHPSAML_VERSION 2.10.6
+
+ENV PHPIPAM_SOURCE https://github.com/phpipam/phpipam/archive/
+ENV PHPIPAM_VERSION 1.3
 ENV WEB_REPO /var/www/html
+ENV PATH=${WEB_REPO}/bin:${PATH} HOME=${WEB_REPO}
 
 # Install required deb packages
 RUN sed -i /etc/apt/sources.list -e 's/$/ non-free'/ && \
     apt-get update && apt-get -y upgrade && \
     rm /etc/apt/preferences.d/no-debian-php && \
     apt-get install -y libcurl4-gnutls-dev libgmp-dev libmcrypt-dev libfreetype6-dev libjpeg-dev libpng-dev libldap2-dev libsnmp-dev snmp-mibs-downloader iputils-ping && \
+RUN apt-get update && apt-get -y upgrade && \
+    apt-get install -y libgmp-dev libmcrypt-dev libfreetype6-dev libjpeg-dev libpng-dev libldap2-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Install required packages and files required for snmp
@@ -22,6 +30,14 @@ RUN mkdir -p /var/lib/mibs/ietf && \
     curl -s ftp://ftp.cisco.com/pub/mibs/v2/CISCO-TC.my -o /var/lib/mibs/ietf/CISCO-TC.txt && \
     curl -s ftp://ftp.cisco.com/pub/mibs/v2/CISCO-VTP-MIB.my -o /var/lib/mibs/ietf/CISCO-VTP-MIB.txt && \
     curl -s ftp://ftp.cisco.com/pub/mibs/v2/MPLS-VPN-MIB.my -o /var/lib/mibs/ietf/MPLS-VPN-MIB.txt
+# OpenShift permission modifications
+RUN mkdir -p /var/run/apache2 && chmod 777 -R /var/run/apache2 &&\
+    mkdir -p /var/log/apache2 && chmod 777 -R /var/log/apache2 &&\
+    mkdir -p /var/lock/apache2 && chmod 777 -R /var/lock/apache2 &&\
+    mkdir -p /etc/apache2/sites-enabled && chmod 777 -R /etc/apache2/sites-enabled &&\
+    mkdir -p /var/www/html && chmod 777 -R /var/www/html && \
+    chmod 664 /etc/passwd
+
 
 # Configure apache and required PHP modules
 RUN docker-php-ext-configure mysqli --with-mysqli=mysqlnd && \
@@ -37,6 +53,7 @@ RUN docker-php-ext-configure mysqli --with-mysqli=mysqlnd && \
     ln -s /usr/include/x86_64-linux-gnu/gmp.h /usr/include/gmp.h && \
     docker-php-ext-configure gmp --with-gmp=/usr/include/x86_64-linux-gnu && \
     docker-php-ext-install gmp && \
+    docker-php-ext-install mcrypt && \
     docker-php-ext-install pcntl && \
     docker-php-ext-configure ldap --with-libdir=lib/x86_64-linux-gnu && \
     docker-php-ext-install ldap && \
@@ -49,6 +66,8 @@ COPY php.ini /usr/local/etc/php/
 
 # Copy phpipam sources to web dir
 ADD ${PHPIPAM_SOURCE}/archive/${PHPIPAM_VERSION}.tar.gz /tmp/
+# copy phpipam sources to web dir
+ADD ${PHPIPAM_SOURCE}/${PHPIPAM_VERSION}.tar.gz /tmp/
 RUN tar -xzf /tmp/${PHPIPAM_VERSION}.tar.gz -C ${WEB_REPO}/ --strip-components=1
 # Copy referenced submodules into the right directory
 ADD ${PHPMAILER_SOURCE}/archive/v${PHPMAILER_VERSION}.tar.gz /tmp/
@@ -58,6 +77,7 @@ RUN tar -xzf /tmp/v${PHPSAML_VERSION}.tar.gz -C ${WEB_REPO}/functions/php-saml/ 
 
 # Use system environment variables into config.php
 ENV PHPIPAM_BASE /
+
 RUN cp ${WEB_REPO}/config.dist.php ${WEB_REPO}/config.php && \
     chown www-data /var/www/html/app/admin/import-export/upload && \
     chown www-data /var/www/html/app/subnets/import-subnet/upload && \
@@ -66,11 +86,21 @@ RUN cp ${WEB_REPO}/config.dist.php ${WEB_REPO}/config.php && \
     sed -i -e "s/\['host'\] = 'localhost'/\['host'\] = getenv(\"MYSQL_ENV_MYSQL_HOST\") ?: \"mysql\"/" \
     -e "s/\['user'\] = 'phpipam'/\['user'\] = getenv(\"MYSQL_ENV_MYSQL_USER\") ?: \"root\"/" \
     -e "s/\['name'\] = 'phpipam'/\['name'\] = getenv(\"MYSQL_ENV_MYSQL_DB\") ?: \"phpipam\"/" \
+    sed -i -e "s/Listen 80/Listen 8080/" /etc/apache2/ports.conf &&\
+    sed -i -e "s/\['host'\] = 'localhost'/\['host'\] = 'mysql'/" \
+    -e "s/\['user'\] = 'phpipam'/\['user'\] = 'root'/" \
     -e "s/\['pass'\] = 'phpipamadmin'/\['pass'\] = getenv(\"MYSQL_ENV_MYSQL_ROOT_PASSWORD\")/" \
     -e "s/\['port'\] = 3306;/\['port'\] = 3306;\n\n\$password_file = getenv(\"MYSQL_ENV_MYSQL_PASSWORD_FILE\");\nif(file_exists(\$password_file))\n\$db\['pass'\] = preg_replace(\"\/\\\\s+\/\", \"\", file_get_contents(\$password_file));/" \
     -e "s/define('BASE', \"\/\")/define('BASE', getenv(\"PHPIPAM_BASE\"))/" \
     -e "s/\$gmaps_api_key.*/\$gmaps_api_key = getenv(\"GMAPS_API_KEY\") ?: \"\";/" \
     -e "s/\$gmaps_api_geocode_key.*/\$gmaps_api_geocode_key = getenv(\"GMAPS_API_GEOCODE_KEY\") ?: \"\";/" \
+    ${WEB_REPO}/config.php && \
+    sed -i -e "s/\['port'\] = 3306;/\['port'\] = 3306;\n\n\$password_file = getenv(\"MYSQL_ENV_MYSQL_ROOT_PASSWORD\");\nif(file_exists(\$password_file))\n\$db\['pass'\] = preg_replace(\"\/\\\\s+\/\", \"\", file_get_contents(\$password_file));/" \
     ${WEB_REPO}/config.php
 
 EXPOSE 80
+USER 10001
+
+WORKDIR ${WEB_REPO}
+
+EXPOSE 8080
